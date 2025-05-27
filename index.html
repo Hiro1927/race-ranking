@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
-  <title>順位表 デバッグ完全版</title>
+  <title>順位表 \</title>
   <meta name="viewport" content="width=device-width,initial-scale=1.0">
   <style>
     body { font-family: sans-serif; padding: 1em; }
@@ -20,6 +20,23 @@
     th, td { border:1px solid #aaa; padding:0.5em; text-align:center; }
     th.sortable { cursor:pointer; text-decoration:underline; }
   </style>
+  <!-- Firebase SDK -->
+  <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-firestore-compat.js"></script>
+  <script>
+    // Firebase 初期化
+    const firebaseConfig = {
+      apiKey: "AIzaSyD_4gVFpgwZOeiuZ8CW3OjRpl1-L1l5Nk8",
+      authDomain: "race-ranking.firebaseapp.com",
+      projectId: "race-ranking",
+      storageBucket: "race-ranking.appspot.com",
+      messagingSenderId: "717151194866",
+      appId: "1:717151194866:web:156aef73e458493ebf0a6b",
+      measurementId: "G-GVWVYF8PCS"
+    };
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.firestore();
+  </script>
 </head>
 <body>
   <h2>順位表 デバッグ完全版</h2>
@@ -34,9 +51,9 @@
       <label><input type="checkbox" id="classORC"> ORC</label>
     </div>
     <div id="params">
-      <div id="paramN"><label><span>Rating</span><input type="number" id="rating" step="0.001"></label></div>
-      <div id="paramIRC"><label><span>TCC</span><input type="number" id="tcc" step="0.001"></label></div>
-      <div id="paramORC">
+      <div id="paramN" style="display:none;"><label><span>Rating</span><input type="number" id="rating" step="0.001"></label></div>
+      <div id="paramIRC" style="display:none;"><label><span>TCC</span><input type="number" id="tcc" step="0.001"></label></div>
+      <div id="paramORC" style="display:none;">
         <label><span>TMF High</span><input type="number" id="tmfHigh" step="0.001"></label>
         <label><span>TMF Med</span><input type="number" id="tmfMed" step="0.001"></label>
         <label><span>TMF Low</span><input type="number" id="tmfLow" step="0.001"></label>
@@ -90,7 +107,14 @@
   <table><thead><tr><th>艇名</th><th>補正</th></tr></thead><tbody id="sumORC"></tbody></table>
 
   <script>
-    document.addEventListener('DOMContentLoaded', ()=>{
+    document.addEventListener('DOMContentLoaded', () => {
+      // グローバル変数
+      let boats = [];
+      let sortBy = 'time';
+      let editId = null;
+      let raceStart = '';
+      let selectedTMF = 'tmfHigh';
+
       // 要素取得
       const boatName = document.getElementById('boatName');
       const cbN = document.getElementById('classN');
@@ -120,94 +144,204 @@
       const thParam = document.getElementById('thParam');
       const thTime = document.getElementById('thTime');
 
-      // データロード＆補完
-      let raw = JSON.parse(localStorage.getItem('boats')||'[]');
-      let boats = raw.map(b=>({
-        id: b.id,
-        name: b.name,
-        classes: Array.isArray(b.classes)?b.classes:[],
-        rating: b.rating||0,
-        tcc: b.tcc||0,
-        tmf: b.tmf||{tmfHigh:0,tmfMed:0,tmfLow:0,coastalHigh:0,coastalMed:0,coastalLow:0},
-        finish: b.finish||''
-      }));
-      let sortBy = 'time';
-      let editId = null;
-      let raceStart = localStorage.getItem('raceStart')||'';
-      let selectedTMF = localStorage.getItem('tmfSelect')||'tmfHigh';
-
-      // 初期UI
-      raceStartInput.value = raceStart;
-      tmfSelect.value = selectedTMF;
-      function showParams(){
-        paramN.style.display = cbN.checked?'block':'none';
-        paramIRC.style.display = cbIRC.checked?'block':'none';
-        paramORC.style.display = cbORC.checked?'block':'none';
+      // showParams 関数
+      function showParams() {
+        paramN.style.display = cbN.checked ? 'block' : 'none';
+        paramIRC.style.display = cbIRC.checked ? 'block' : 'none';
+        paramORC.style.display = cbORC.checked ? 'block' : 'none';
       }
-      [cbN,cbIRC,cbORC].forEach(cb=>cb.addEventListener('change',showParams)); showParams();
+      [cbN, cbIRC, cbORC].forEach(cb => cb.addEventListener('change', showParams));
+      showParams();
 
-      const nowHMS=()=>{const d=new Date();return [d.getHours(),d.getMinutes(),d.getSeconds()].map(n=>String(n).padStart(2,'0')).join(':');};
-      const toSec=str=>{const [h,m,s]=str.split(':').map(Number);return h*3600+m*60+s;};
+      // 時間ヘルパー
+      const nowHMS = () => {
+        const d = new Date();
+        return [d.getHours(), d.getMinutes(), d.getSeconds()]
+          .map(n => String(n).padStart(2, '0')).join(':');
+      };
+      const toSec = str => {
+        const [h, m, s] = str.split(':').map(Number);
+        return h * 3600 + m * 60 + s;
+      };
 
-      function save(){
-        localStorage.setItem('boats',JSON.stringify(boats));
-        localStorage.setItem('raceStart',raceStart);
-        localStorage.setItem('tmfSelect',selectedTMF);
+      // render 関数
+      function render() {
+        // 経過秒計算
+        boats.forEach(b => {
+          if (raceStart && b.finish) {
+            let delta = toSec(b.finish) - toSec(raceStart);
+            if (delta < 0) delta += 86400;
+            b.elapsed = delta;
+          } else {
+            b.elapsed = null;
+          }
+        });
+        // ソート
+        boats.sort((a, b) => {
+          if (sortBy === 'name') return a.name.localeCompare(b.name);
+          if (sortBy === 'param') {
+            const pa = a.classes.includes('N') ? a.rating : a.classes.includes('IRC') ? a.tcc : a.tmf[selectedTMF];
+            const pb = b.classes.includes('N') ? b.rating : b.classes.includes('IRC') ? b.tcc : b.tmf[selectedTMF];
+            return pa - pb;
+          }
+          return (a.elapsed === null ? 1 : b.elapsed === null ? -1 : a.elapsed - b.elapsed);
+        });
+        // テーブル更新
+        tbody.innerHTML = '';
+        boats.forEach(b => {
+          const params = b.classes.map(c =>
+            c === 'N' ? `Rating:${b.rating}` : c === 'IRC' ? `TCC:${b.tcc}` : `TMF:${b.tmf[selectedTMF]}`
+          ).join(', ') || '-';
+          const corr = b.classes.map(c => {
+            const f = c === 'N' ? b.rating : c === 'IRC' ? b.tcc : b.tmf[selectedTMF];
+            return (b.elapsed * f).toFixed(2);
+          }).join(', ') || '-';
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td>${b.name}</td>
+            <td>${b.classes.join(', ')}</td>
+            <td>${params}</td>
+            <td>${b.finish || '-'}</td>
+            <td>${b.elapsed !== null ? b.elapsed : '-'}</td>
+            <td>${corr}</td>
+            <td>
+              ${b.finish
+                ? `<button onclick="cancelFinish('${b.id}')">取消</button>`
+                : `<button onclick="recordFinish('${b.id}')">記録</button>`}
+              <button onclick="startEdit('${b.id}')">編集</button>
+              <button onclick="removeBoat('${b.id}')">削除</button>
+            </td>
+          `;
+          tbody.appendChild(tr);
+        });
+        // クラス別ランキング
+        sumN.innerHTML = '';
+        sumIRC.innerHTML = '';
+        sumORC.innerHTML = '';
+        const ranks = { N: sumN, IRC: sumIRC, ORC: sumORC };
+        Object.entries(ranks).forEach(([cls, el]) => {
+          boats.filter(b => b.elapsed !== null && b.classes.includes(cls))
+            .map(b => ({ name: b.name, val: b.elapsed * (cls === 'N' ? b.rating : cls === 'IRC' ? b.tcc : b.tmf[selectedTMF]) }))
+            .sort((a, b) => a.val - b.val)
+            .forEach(item => {
+              const tr = document.createElement('tr');
+              tr.innerHTML = `<td>${item.name}</td><td>${item.val.toFixed(2)}</td>`;
+              el.appendChild(tr);
+            });
+        });
+      }
+
+      // Firestore リアルタイム購読
+      db.collection('boats').onSnapshot(snapshot => {
+        boats = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         render();
+      }, err => console.error('データ読み込みエラー:', err));
+
+      // save 関数
+      function save() {
+        const batch = db.batch();
+        boats.forEach(b => {
+          const ref = b.id
+            ? db.collection('boats').doc(b.id)
+            : db.collection('boats').doc();
+          if (!b.id) b.id = ref.id;
+          batch.set(ref, {
+            name: b.name,
+            classes: b.classes,
+            rating: b.rating,
+            tcc: b.tcc,
+            tmf: b.tmf,
+            finish: b.finish
+          }, { merge: true });
+        });
+        batch.commit().then(() => render()).catch(console.error);
       }
 
-      // 登録/更新
-      btnReg.addEventListener('click',()=>{
-        const name=boatName.value.trim(); if(!name)return;
-        const classes=[]; if(cbN.checked)classes.push('N'); if(cbIRC.checked)classes.push('IRC'); if(cbORC.checked)classes.push('ORC'); if(!classes.length)return;
-        if(classes.includes('N')&&!rating.value)return; if(classes.includes('IRC')&&!tcc.value)return;
-        if(classes.includes('ORC')){
-          const sel=tmfSelect.value; const val=document.getElementById(sel).value; if(!val){alert(`ORCの${tmfSelect.options[tmfSelect.selectedIndex].text}を入力してください`);return;}
+      // イベントハンドラ
+      btnReg.addEventListener('click', () => {
+        const name = boatName.value.trim(); if (!name) return;
+        const classes = [];
+        if (cbN.checked) classes.push('N');
+        if (cbIRC.checked) classes.push('IRC');
+        if (cbORC.checked) classes.push('ORC');
+        if (!classes.length) return;
+        if (classes.includes('N') && !rating.value) return;
+        if (classes.includes('IRC') && !tcc.value) return;
+        if (classes.includes('ORC')) {
+          const sel = tmfSelect.value;
+          const val = document.getElementById(sel).value;
+          if (!val) return alert(`ORCの${tmfSelect.options[tmfSelect.selectedIndex].text}を入力してください`);
         }
-        const d={id:editId||Date.now(),name,classes,
-          rating:+rating.value,tcc:+tcc.value,
-          tmf:{tmfHigh:+tmfHigh.value,tmfMed:+tmfMed.value,tmfLow:+tmfLow.value,coastalHigh:+coastalHigh.value,coastalMed:+coastalMed.value,coastalLow:+coastalLow.value},
-          finish:''};
-        if(editId){boats=boats.map(b=>b.id===editId?d:b);editId=null;btnReg.textContent='登録';}
-        else boats.push(d);
-        btnReg.textContent='登録'; save();
+        const data = {
+          id: editId || Date.now().toString(),
+          name,
+          classes,
+          rating: parseFloat(rating.value),
+          tcc: parseFloat(tcc.value),
+          tmf: {
+            tmfHigh: parseFloat(tmfHigh.value),
+            tmfMed: parseFloat(tmfMed.value),
+            tmfLow: parseFloat(tmfLow.value),
+            coastalHigh: parseFloat(coastalHigh.value),
+            coastalMed: parseFloat(coastalMed.value),
+            coastalLow: parseFloat(coastalLow.value)
+          },
+          finish: ''
+        };
+        if (editId) boats = boats.map(b => b.id === editId ? data : b);
+        else boats.push(data);
+        editId = null; btnReg.textContent = '登録';
+        save();
       });
 
-      // 編集
-      function startEdit(id){const b=boats.find(x=>x.id===id);if(!b)return;editId=id;btnReg.textContent='更新';boatName.value=b.name;cbN.checked=b.classes.includes('N');cbIRC.checked=b.classes.includes('IRC');cbORC.checked=b.classes.includes('ORC');showParams();rating.value=b.rating;tcc.value=b.tcc;tmfHigh.value=b.tmf.tmfHigh;tmfMed.value=b.tmf.tmfMed;tmfLow.value=b.tmf.tmfLow;coastalHigh.value=b.tmf.coastalHigh;coastalMed.value=b.tmf.coastalMed;coastalLow.value=b.tmf.coastalLow;}
-      window.startEdit=startEdit;
+      window.startEdit = id => {
+        const b = boats.find(x => x.id === id); if (!b) return;
+        editId = id; btnReg.textContent = '更新';
+        boatName.value = b.name;
+        cbN.checked = b.classes.includes('N'); cbIRC.checked = b.classes.includes('IRC'); cbORC.checked = b.classes.includes('ORC'); showParams();
+        rating.value = b.rating; tcc.value = b.tcc;
+        tmfHigh.value = b.tmf.tmfHigh; tmfMed.value = b.tmf.tmfMed; tmfLow.value = b.tmf.tmfLow;
+        coastalHigh.value = b.tmf.coastalHigh; coastalMed.value = b.tmf.coastalMed; coastalLow.value = b.tmf.coastalLow;
+      };
 
-      // 取消登録
-      window.cancelFinish=id=>{const b=boats.find(x=>x.id===id);if(b&&b.finish){b.finish='';save();}};
+      window.recordFinish = id => {
+        const b = boats.find(x => x.id === id);
+        if (b && raceStartInput.value && !b.finish) {
+          b.finish = nowHMS();
+          save();
+        }
+      };
 
-      // ソート切替
-      thName.addEventListener('click',()=>{sortBy='name';save();});
-      thParam.addEventListener('click',()=>{sortBy='param';save();});
-      thTime.addEventListener('click',()=>{sortBy='time';save();});
+      window.cancelFinish = id => {
+        const b = boats.find(x => x.id === id);
+        if (b && b.finish) { b.finish = ''; save(); }
+      };
 
-      // 時刻・補正選択変更
-      raceStartInput.addEventListener('change',()=>{raceStart=raceStartInput.value;save();});
-      tmfSelect.addEventListener('change',()=>{selectedTMF=tmfSelect.value;save();});
+      window.removeBoat = id => {
+        boats = boats.filter(x => x.id !== id);
+        save();
+      };
 
-      // 全取消
-      btnClearAll.addEventListener('click',()=>{boats.forEach(b=>b.finish='');save();});
+      thName.addEventListener('click', () => { sortBy = 'name'; render(); });
+      thParam.addEventListener('click', () => { sortBy = 'param'; render(); });
+      thTime.addEventListener('click', () => { sortBy = 'time'; render(); });
+      raceStartInput.addEventListener('change', () => { raceStart = raceStartInput.value; render(); });
+      tmfSelect.addEventListener('change', () => { render(); });
+      btnClearAll.addEventListener('click', () => { boats.forEach(b => b.finish = ''); save(); });
+      btnExport.addEventListener('click', () => {
+        const header = ['艇名','クラス','パラメータ','Finish','経過','補正'];
+        const rows = boats.map(b => {
+          const params = b.classes.map(c => c==='N'?b.rating:c==='IRC'?b.tcc:b.tmf[tmfSelect.value]).join(';');
+          const corr = b.classes.map(c => { const f = c==='N'?b.rating:c==='IRC'?b.tcc:b.tmf[tmfSelect.value]; return (b.elapsed*f).toFixed(2); }).join(';');
+          return [b.name,b.classes.join(';'),params,b.finish||'',b.elapsed||'',corr];
+        });
+        let csv = header.join(',') + '\n' + rows.map(r=>r.join(',')).join('\n');
+        const bom = '\uFEFF';
+        const blob = new Blob([bom+csv], { type:'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a'); a.href = url; a.download = 'race_results.csv'; a.click(); URL.revokeObjectURL(url);
+      });
 
-      // CSV出力
-      btnExport.addEventListener('click',()=>{const header=['艇名','クラス','パラメータ','Finish','経過','補正'];const rows=boats.map(b=>{const params=b.classes.map(c=>c==='N'?b.rating:c==='IRC'?b.tcc:b.tmf[selectedTMF]).join(';');const corr=b.classes.map(c=>{const f=c==='N'?b.rating:c==='IRC'?b.tcc:b.tmf[selectedTMF];return(b.elapsed*f).toFixed(2);}).join(';');return[b.name,b.classes.join(';'),params,b.finish||'',b.elapsed||'',corr];});let csv=header.join(',')+'\n'+rows.map(r=>r.join(',')).join('\n');const bom='\uFEFF';const blob=new Blob([bom+csv],{type:'text/csv;charset=utf-8;'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='race_results.csv';a.click();URL.revokeObjectURL(url);});
-
-      // 記録
-      window.recordFinish=id=>{const b=boats.find(x=>x.id===id);if(b&&raceStart&&!b.finish){b.finish=nowHMS();save();}};
-
-      // 削除
-      window.removeBoat=id=>{boats=boats.filter(x=>x.id!==id);save();};
-
-      // 描画
-      function render(){
-        boats.forEach(b=>{if(raceStart&&b.finish){b.elapsed=toSec(b.finish)-toSec(raceStart);if(b.elapsed<0)b.elapsed+=86400;}else b.elapsed=null;});
-        boats.sort((a,b)=>{if(sortBy==='name')return a.name.localeCompare(b.name);if(sortBy==='param'){const pa=a.classes.includes('N'?a.rating:a.classes.includes('IRC')?a.tcc:a.tmf[selectedTMF]);const pb=b.classes.includes('N'?b.rating:b.classes.includes('IRC')?b.tcc:b.tmf[selectedTMF]);return pa-pb;}return a.elapsed===null?1:b.elapsed===null?-1:a.elapsed-b.elapsed;});
-        tbody.innerHTML='';boats.forEach(b=>{const params=b.classes.map(c=>c==='N'?`Rating:${b.rating}`:c==='IRC'?`TCC:${b.tcc}`:`TMF:${b.tmf[selectedTMF]}`).join(', ');const corr=b.classes.map(c=>{const f=c==='N'?b.rating:c==='IRC'?b.tcc:b.tmf[selectedTMF];return(b.elapsed*f).toFixed(2);}).join(', ');const tr=document.createElement('tr');tr.innerHTML=`<td>${b.name}</td><td>${b.classes.join(', ')}</td><td>${params||'-'}</td><td>${b.finish||'-'}</td><td>${b.elapsed!=null?b.elapsed:'-'}</td><td>${corr||'-'}</td><td>${b.finish?`<button onclick="cancelFinish(${b.id})">取消</button>`:`<button onclick="recordFinish(${b.id})">記録</button>`} <button onclick="startEdit(${b.id})">編集</button> <button onclick="removeBoat(${b.id})">削除</button></td>`;tbody.appendChild(tr);});
-        sumN.innerHTML='';sumIRC.innerHTML='';sumORC.innerHTML='';const ranks={'N':sumN,'IRC':sumIRC,'ORC':sumORC};Object.entries(ranks).forEach(([cls,el])=>{boats.filter(b=>b.elapsed!=null&&b.classes.includes(cls)).map(b=>({name:b.name,val:b.elapsed*(cls==='N'?b.rating:cls==='IRC'?b.tcc:b.tmf[selectedTMF])})).sort((a,b)=>a.val-b.val).forEach(item=>{const tr=document.createElement('tr');tr.innerHTML=`<td>${item.name}</td><td>${item.val.toFixed(2)}</td>`;el.appendChild(tr);});});}
-      render();
     });
   </script>
 </body>
